@@ -199,3 +199,392 @@
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+#ifdef __ANDROID__
+#include <android_native_app_glue.h>
+#endif
+#include <SFML/Graphics.hpp>
+#include <vector>
+#include <string>
+#include <cstdlib>
+#include <ctime>
+#include <iostream>
+
+// Các trạng thái của game
+enum class GameState { LOBBY, GAME, SETTINGS };
+// Các kiểu map
+enum class MapType { SURVIVAL, TACTICAL, SOLO };
+
+// Một lớp Button đơn giản để hiển thị hình chữ nhật và text (các thuộc tính cơ bản)
+struct Button {
+    sf::RectangleShape shape;
+    sf::Text text;
+    Button(const sf::Vector2f &pos, const sf::Vector2f &size, const std::string &str, const sf::Font &font) {
+        shape.setPosition(pos);
+        shape.setSize(size);
+        shape.setFillColor(sf::Color(200, 200, 200));
+        text.setFont(font);
+        text.setString(str);
+        text.setCharacterSize(20);
+        text.setFillColor(sf::Color::Black);
+        // Căn giữa text (giả sử kích thước text không quá lớn)
+        sf::FloatRect txtBounds = text.getLocalBounds();
+        text.setPosition(pos.x + (size.x - txtBounds.width) / 2 - txtBounds.left,
+                         pos.y + (size.y - txtBounds.height) / 2 - txtBounds.top);
+    }
+    bool isClicked(const sf::Vector2f &mousePos) {
+        return shape.getGlobalBounds().contains(mousePos);
+    }
+};
+
+// Các lớp đối tượng game
+
+// Người chơi
+struct Player {
+    sf::RectangleShape shape;
+    bool hasWeapon;
+    sf::Vector2f velocity;
+    Player() {
+        shape.setSize(sf::Vector2f(50.f, 30.f));
+        shape.setFillColor(sf::Color::Blue);
+        shape.setPosition(375.f, 550.f);
+        hasWeapon = false;
+        velocity = sf::Vector2f(0.f, 0.f);
+    }
+    void update(float dt) {
+        // Cập nhật vị trí theo vận tốc (giả lập “nhảy” với trọng lực)
+        shape.move(velocity * dt);
+    }
+};
+
+// Đạn (giống ví dụ ban đầu)
+struct Bullet {
+    sf::CircleShape shape;
+    float speed;
+    Bullet(float x, float y) {
+        shape.setRadius(5.f);
+        shape.setFillColor(sf::Color::Red);
+        shape.setPosition(x, y);
+        speed = 500.f;
+    }
+};
+
+// Kẻ địch
+struct Enemy {
+    sf::RectangleShape shape;
+    float speed;
+    Enemy(float x, float y) {
+        shape.setSize(sf::Vector2f(40.f, 40.f));
+        shape.setFillColor(sf::Color::Green);
+        shape.setPosition(x, y);
+        speed = 100.f;
+    }
+};
+
+// Đối tượng “Weapon Pickup” cho map Sinh tồn
+struct WeaponPickup {
+    sf::RectangleShape shape;
+    bool picked;
+    WeaponPickup(float x, float y) {
+        shape.setSize(sf::Vector2f(30.f, 30.f));
+        shape.setFillColor(sf::Color::Yellow);
+        shape.setPosition(x, y);
+        picked = false;
+    }
+};
+
+#ifdef __ANDROID__
+// Điểm vào của Android (sử dụng android_main thay cho main)
+void android_main(struct android_app* app) {
+    // Chờ cho đến khi hệ thống Android sẵn sàng
+#else
+int main() {
+#endif
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+    
+    sf::RenderWindow window(sf::VideoMode(800, 600), "2D Shooter Offline");
+    window.setFramerateLimit(60);
+    
+    // Load font (đảm bảo file arial.ttf có trong thư mục chạy)
+    sf::Font font;
+    if (!font.loadFromFile("arial.ttf")) {
+        std::cerr << "Error loading font!\n";
+        return -1;
+    }
+    
+    // Khởi tạo các state ban đầu
+    GameState gameState = GameState::LOBBY;
+    MapType currentMap = MapType::SURVIVAL; // Mặc định là map Sinh tồn
+    
+    // --- UI cho Lobby ---
+    Button playButton(sf::Vector2f(300, 200), sf::Vector2f(200, 50), "Play", font);
+    Button settingsButton(sf::Vector2f(300, 300), sf::Vector2f(200, 50), "Settings", font);
+    Button exitButton(sf::Vector2f(300, 400), sf::Vector2f(200, 50), "Exit", font);
+    // Các nút chọn map
+    Button map1Button(sf::Vector2f(100, 100), sf::Vector2f(150, 50), "Sinh Ton", font);
+    Button map2Button(sf::Vector2f(300, 100), sf::Vector2f(150, 50), "Tu Chien", font);
+    Button map3Button(sf::Vector2f(500, 100), sf::Vector2f(150, 50), "Doc Lang", font);
+    
+    // --- UI cho Settings ---
+    Button langButton(sf::Vector2f(300, 200), sf::Vector2f(200, 50), "Language: VN", font);
+    Button interfaceButton(sf::Vector2f(300, 300), sf::Vector2f(200, 50), "Interface", font);
+    Button backButton(sf::Vector2f(300, 400), sf::Vector2f(200, 50), "Back", font);
+    
+    // --- UI In-Game (cho mobile: các nút điều khiển) ---
+    Button btnSit(sf::Vector2f(10, 500), sf::Vector2f(50, 50), "Sit", font);
+    Button btnJump(sf::Vector2f(70, 500), sf::Vector2f(50, 50), "Jump", font);
+    Button btnShoot(sf::Vector2f(130, 500), sf::Vector2f(50, 50), "Shoot", font);
+    Button btnLie(sf::Vector2f(190, 500), sf::Vector2f(50, 50), "Lie", font);
+    Button btnAim(sf::Vector2f(250, 500), sf::Vector2f(50, 50), "Aim", font);
+    Button btnSettings(sf::Vector2f(700, 10), sf::Vector2f(50, 50), "Set", font);
+    
+    // Dành cho map 2 và map 3: nút mở cửa shop để mua súng
+    Button shopButton(sf::Vector2f(600, 500), sf::Vector2f(100, 50), "Buy Gun", font);
+    
+    // --- Các đối tượng game ---
+    Player player;
+    std::vector<Bullet> bullets;
+    std::vector<Enemy> enemies;
+    std::vector<WeaponPickup> pickups; // chỉ dùng cho map Sinh tồn
+    
+    // Nếu map là map 2 hoặc 3 thì ban đầu player chưa có súng
+    if (currentMap != MapType::SURVIVAL) {
+        player.hasWeapon = false;
+    }
+    
+    // Đối với map Sinh tồn: định nghĩa các vị trí cố định của “weapon pickup”
+    if (currentMap == MapType::SURVIVAL) {
+        pickups.push_back(WeaponPickup(100, 300)); // ví dụ: nhà
+        pickups.push_back(WeaponPickup(400, 100)); // ví dụ: đường
+        pickups.push_back(WeaponPickup(700, 350));
+    }
+    
+    // Các biến hỗ trợ thời gian
+    sf::Clock clock;
+    float enemySpawnTimer = 0.f;
+    float enemySpawnInterval = 2.f; // spawn kẻ địch mỗi 2 giây
+    
+    while (window.isOpen()) {
+        float dt = clock.restart().asSeconds();
+        sf::Event event;
+        while (window.pollEvent(event)) {
+            if (event.type == sf::Event::Closed)
+                window.close();
+            
+            // Xử lý sự kiện chuột (đối với Android bạn cần thay bằng Touch events)
+            if (event.type == sf::Event::MouseButtonPressed) {
+                sf::Vector2f mousePos(event.mouseButton.x, event.mouseButton.y);
+                if (gameState == GameState::LOBBY) {
+                    // Các nút trong lobby
+                    if (playButton.isClicked(mousePos)) {
+                        gameState = GameState::GAME;
+                        // Reset lại các đối tượng game
+                        player = Player();
+                        bullets.clear();
+                        enemies.clear();
+                        if (currentMap == MapType::SURVIVAL) {
+                            pickups.clear();
+                            pickups.push_back(WeaponPickup(100, 300));
+                            pickups.push_back(WeaponPickup(400, 100));
+                            pickups.push_back(WeaponPickup(700, 350));
+                        } else {
+                            player.hasWeapon = false;
+                        }
+                    }
+                    else if (settingsButton.isClicked(mousePos))
+                        gameState = GameState::SETTINGS;
+                    else if (exitButton.isClicked(mousePos))
+                        window.close();
+                    // Chọn map
+                    else if (map1Button.isClicked(mousePos))
+                        currentMap = MapType::SURVIVAL;
+                    else if (map2Button.isClicked(mousePos))
+                        currentMap = MapType::TACTICAL;
+                    else if (map3Button.isClicked(mousePos))
+                        currentMap = MapType::SOLO;
+                }
+                else if (gameState == GameState::SETTINGS) {
+                    // Cài đặt
+                    if (langButton.isClicked(mousePos)) {
+                        // Thay đổi ngôn ngữ (đổi text cho đơn giản)
+                        if (langButton.text.getString() == "Language: VN")
+                            langButton.text.setString("Language: CN");
+                        else
+                            langButton.text.setString("Language: VN");
+                    }
+                    else if (backButton.isClicked(mousePos))
+                        gameState = GameState::LOBBY;
+                }
+                else if (gameState == GameState::GAME) {
+                    // Các nút in-game
+                    if (btnSit.isClicked(mousePos)) {
+                        // Giả lập hành động “ngồi” (đổi màu)
+                        player.shape.setFillColor(sf::Color::Cyan);
+                    }
+                    if (btnJump.isClicked(mousePos)) {
+                        // Giả lập “nhảy”: đặt vận tốc dương âm cho trục Y
+                        player.velocity.y = -300;
+                    }
+                    if (btnLie.isClicked(mousePos)) {
+                        // Giả lập “nằm”: thay đổi kích thước
+                        player.shape.setSize(sf::Vector2f(50, 15));
+                    }
+                    if (btnAim.isClicked(mousePos)) {
+                        // Giả lập “súng ngắm”: thay đổi màu
+                        player.shape.setFillColor(sf::Color::Magenta);
+                    }
+                    if (btnShoot.isClicked(mousePos)) {
+                        // Chỉ cho bắn nếu player có súng
+                        if (player.hasWeapon)
+                            bullets.push_back(Bullet(player.shape.getPosition().x + player.shape.getSize().x/2 - 5, player.shape.getPosition().y));
+                    }
+                    if (btnSettings.isClicked(mousePos)) {
+                        gameState = GameState::SETTINGS;
+                    }
+                    // Nếu map là Tử chiến hoặc Độc lang thì hiển thị nút mua súng
+                    if (currentMap != MapType::SURVIVAL && shopButton.isClicked(mousePos)) {
+                        player.hasWeapon = true;
+                    }
+                }
+            }
+        }
+        
+        // --- Cập nhật logic theo state ---
+        if (gameState == GameState::GAME) {
+            // Cập nhật trọng lực đơn giản (chỉ cho phép “nhảy” khi chưa chạm đất)
+            if (player.shape.getPosition().y < 550)
+                player.velocity.y += 500 * dt; // trọng lực
+            else {
+                player.velocity.y = 0;
+                player.shape.setPosition(player.shape.getPosition().x, 550);
+            }
+            player.update(dt);
+            
+#ifndef __ANDROID__
+            // Điều khiển bằng bàn phím (cho desktop)
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left))
+                player.shape.move(-300 * dt, 0);
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
+                player.shape.move(300 * dt, 0);
+#endif
+            // Spawn kẻ địch
+            enemySpawnTimer += dt;
+            if (enemySpawnTimer >= enemySpawnInterval) {
+                float enemyX = static_cast<float>(std::rand() % (800 - 40));
+                enemies.push_back(Enemy(enemyX, -40));
+                enemySpawnTimer = 0;
+            }
+            
+            // Cập nhật đạn
+            for (size_t i = 0; i < bullets.size(); ) {
+                bullets[i].shape.move(0, -bullets[i].speed * dt);
+                if (bullets[i].shape.getPosition().y < 0)
+                    bullets.erase(bullets.begin() + i);
+                else
+                    ++i;
+            }
+            
+            // Cập nhật kẻ địch
+            for (size_t i = 0; i < enemies.size(); ) {
+                enemies[i].shape.move(0, enemies[i].speed * dt);
+                if (enemies[i].shape.getPosition().y > 600)
+                    enemies.erase(enemies.begin() + i);
+                else
+                    ++i;
+            }
+            
+            // Xử lý va chạm giữa đạn và kẻ địch (xóa cả 2 nếu va chạm)
+            for (size_t i = 0; i < bullets.size(); ) {
+                bool bulletRemoved = false;
+                for (size_t j = 0; j < enemies.size(); ) {
+                    if (bullets[i].shape.getGlobalBounds().intersects(enemies[j].shape.getGlobalBounds())) {
+                        enemies.erase(enemies.begin() + j);
+                        bullets.erase(bullets.begin() + i);
+                        bulletRemoved = true;
+                        break;
+                    } else {
+                        ++j;
+                    }
+                }
+                if (!bulletRemoved)
+                    ++i;
+            }
+            
+            // Ở map Sinh tồn: nếu người chơi va chạm với weapon pickup thì nhận súng
+            if (currentMap == MapType::SURVIVAL) {
+                for (auto &pickup : pickups) {
+                    if (!pickup.picked && player.shape.getGlobalBounds().intersects(pickup.shape.getGlobalBounds())) {
+                        pickup.picked = true;
+                        player.hasWeapon = true;
+                    }
+                }
+            }
+            // Lưu ý: Va chạm giữa player và enemy được thiết kế “không gây hậu quả” (theo yêu cầu)
+        }
+        
+        // --- Vẽ màn hình ---
+        window.clear();
+        if (gameState == GameState::LOBBY) {
+            // Vẽ giao diện Lobby
+            window.draw(playButton.shape);
+            window.draw(playButton.text);
+            window.draw(settingsButton.shape);
+            window.draw(settingsButton.text);
+            window.draw(exitButton.shape);
+            window.draw(exitButton.text);
+            window.draw(map1Button.shape);
+            window.draw(map1Button.text);
+            window.draw(map2Button.shape);
+            window.draw(map2Button.text);
+            window.draw(map3Button.shape);
+            window.draw(map3Button.text);
+        }
+        else if (gameState == GameState::SETTINGS) {
+            // Vẽ giao diện Settings
+            window.draw(langButton.shape);
+            window.draw(langButton.text);
+            window.draw(interfaceButton.shape);
+            window.draw(interfaceButton.text);
+            window.draw(backButton.shape);
+            window.draw(backButton.text);
+        }
+        else if (gameState == GameState::GAME) {
+            // Vẽ gameplay
+            window.draw(player.shape);
+            for (const auto &b : bullets)
+                window.draw(b.shape);
+            for (const auto &e : enemies)
+                window.draw(e.shape);
+            if (currentMap == MapType::SURVIVAL) {
+                for (const auto &p : pickups) {
+                    if (!p.picked)
+                        window.draw(p.shape);
+                }
+            }
+            // Vẽ các nút điều khiển in-game
+            window.draw(btnSit.shape);
+            window.draw(btnSit.text);
+            window.draw(btnJump.shape);
+            window.draw(btnJump.text);
+            window.draw(btnShoot.shape);
+            window.draw(btnShoot.text);
+            window.draw(btnLie.shape);
+            window.draw(btnLie.text);
+            window.draw(btnAim.shape);
+            window.draw(btnAim.text);
+            window.draw(btnSettings.shape);
+            window.draw(btnSettings.text);
+            if (currentMap != MapType::SURVIVAL && !player.hasWeapon) {
+                window.draw(shopButton.shape);
+                window.draw(shopButton.text);
+            }
+        }
+        window.display();
+    }
+    
+#ifdef __ANDROID__
+    return;
+#else
+    return 0;
+#endif
+}
